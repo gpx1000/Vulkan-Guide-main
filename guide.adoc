@@ -103,6 +103,8 @@ include::{chapters}hlsl.adoc[]
 
 include::{chapters}atomics.adoc[]
 
+include::{chapters}vulkanml_inference.adoc[]
+
 include::{chapters}wsi.adoc[]
 include::{chapters}enabling_features.adoc[]
 

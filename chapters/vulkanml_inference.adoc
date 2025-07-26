@@ -1,0 +1,544 @@
+// Copyright 2025 Holochip, Inc.
+// SPDX-License-Identifier: CC-BY-4.0
+
+// Required for both single-page and combined guide xrefs to work
+ifndef::chapters[:chapters:]
+ifndef::images[:images: images/]
+
+[[vulkanml-inference]]
+= VulkanML for Inference
+
+VulkanML is a Vulkan-based machine learning framework that enables high-performance inference on GPUs using native Vulkan compute capabilities. It leverages modern GPU features like cooperative matrices to speed up matrix operations commonly used in neural network inference.
+
+[NOTE]
+====
+VulkanML provides a standardized way to perform ML inference using Vulkan's compute capabilities, making it possible to integrate machine learning workloads directly into Vulkan applications without requiring separate ML frameworks.
+====
+
+== Overview
+
+VulkanML focuses on:
+
+* **Cooperative Matrix Operations**: Utilizing hardware-accelerated matrix operations for efficient neural network computations
+* **Multiple Precision Support**: Supporting various data formats including FP16, BFloat16, and FP8 for different performance and accuracy trade-offs
+* **Vendor Optimization**: Providing flexibility for vendor-specific optimizations while maintaining portability
+
+== Cooperative Matrix Support
+
+Cooperative matrices are a key feature for accelerating matrix operations in VulkanML. These operations allow multiple shader invocations to cooperatively perform matrix computations, taking advantage of specialized hardware units.
+
+=== Checking for Cooperative Matrix Support
+
+[source,cpp]
+----
+VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperativeMatrixFeatures = {};
+cooperativeMatrixFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+
+VkPhysicalDeviceFeatures2 deviceFeatures2 = {};
+deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+deviceFeatures2.pNext = &cooperativeMatrixFeatures;
+
+vkGetPhysicalDeviceFeatures2(physicalDevice, &deviceFeatures2);
+
+if (cooperativeMatrixFeatures.cooperativeMatrix) {
+    // Cooperative matrix operations are supported
+}
+----
+
+=== Querying Cooperative Matrix Properties
+
+[source,cpp]
+----
+uint32_t propertyCount = 0;
+vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &propertyCount, nullptr);
+
+std::vector<VkCooperativeMatrixPropertiesKHR> matrixProperties(propertyCount);
+for (auto& prop : matrixProperties) {
+    prop.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+}
+
+vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, &propertyCount, matrixProperties.data());
+
+// Check for supported matrix dimensions and types
+for (const auto& prop : matrixProperties) {
+    // prop.MSize, prop.NSize, prop.KSize contain the supported matrix dimensions
+    // prop.AType, prop.BType, prop.CType, prop.ResultType contain supported data types
+}
+----
+
+== Supported Data Formats
+
+VulkanML supports multiple data formats to balance performance and accuracy requirements:
+
+=== VK_FORMAT_R16G16B16A16_SFLOAT (FP16)
+* **Use Case**: General-purpose inference with good accuracy/performance balance
+* **Memory Usage**: 2 bytes per component
+* **Precision**: IEEE 754 half-precision floating-point
+* **Hardware Support**: Widely supported across modern GPUs
+
+[source,glsl]
+----
+#version 450
+#extension GL_KHR_cooperative_matrix : enable
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// Cooperative matrix using FP16
+coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> matrixC;
+coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> matrixA;
+coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> matrixB;
+
+void main() {
+    // Load matrices from buffers
+    coopMatLoad(matrixA, bufferA, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(matrixB, bufferB, 0, 16, gl_CooperativeMatrixLayoutColumnMajor);
+
+    // Perform matrix multiplication
+    matrixC = coopMatMulAdd(matrixA, matrixB, matrixC);
+
+    // Store result
+    coopMatStore(matrixC, bufferC, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+}
+----
+
+=== BFloat16 Support
+* **Use Case**: Training-compatible inference with reduced memory usage
+* **Memory Usage**: 2 bytes per component
+* **Precision**: Brain floating-point format (8-bit exponent, 7-bit mantissa)
+* **Advantage**: Same dynamic range as FP32 but half the memory
+
+[NOTE]
+====
+BFloat16 support requires checking for `VK_KHR_shader_float16_int8` extension and appropriate hardware support. Not all vendors may support BFloat16 in cooperative matrices.
+====
+
+=== FP8 Support
+* **Use Case**: Ultra-high performance inference with acceptable accuracy loss
+* **Memory Usage**: 1 byte per component
+* **Precision**: 8-bit floating-point (various formats: E4M3, E5M2)
+* **Hardware Support**: Limited to newer GPU architectures
+
+[NOTE]
+====
+FP8 support is vendor-specific and may require proprietary extensions. Check with your GPU vendor for specific FP8 cooperative matrix support.
+====
+
+== Vendor-Specific Considerations
+
+=== Block Sizes and Performance
+
+Different GPU vendors expose different optimal block sizes for cooperative matrices:
+
+[source,cpp]
+----
+// Example of checking for optimal block sizes
+void selectOptimalBlockSize(const std::vector<VkCooperativeMatrixPropertiesKHR>& properties) {
+    for (const auto& prop : properties) {
+        if (prop.AType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+            prop.BType == VK_COMPONENT_TYPE_FLOAT16_KHR) {
+
+            // Different vendors may expose different optimal sizes
+            // NVIDIA: Often 16x16, 32x8, 8x32
+            // AMD: May prefer different tile sizes
+            // Intel: Architecture-specific optimizations
+
+            printf("Supported matrix size: %dx%dx%d\n", prop.MSize, prop.NSize, prop.KSize);
+        }
+    }
+}
+----
+
+=== Vendor-Specific Optimizations
+
+[NOTE]
+====
+**Performance Optimization Strategy**: While VulkanML provides a portable interface, maximum performance often requires vendor-specific tuning:
+
+* **NVIDIA**: Optimize for Tensor Core utilization with appropriate block sizes
+* **AMD**: Consider RDNA/CDNA architecture-specific matrix operations
+* **Intel**: Leverage XMX (Xe Matrix Extensions) when available
+* **ARM**: Optimize for Mali GPU matrix capabilities
+
+For production deployments, consider implementing vendor-specific code paths or working with GPU vendors to develop optimized kernels.
+====
+
+== Model Loading and Preparation
+
+This section covers how to load different model formats into Vulkan objects for inference. The focus is on preparing models and creating the necessary Vulkan resources, with inference execution covered in the next section.
+
+=== TensorFlow Lite Model Loading
+
+TensorFlow Lite models can be loaded and prepared for VulkanML inference by extracting the model structure and creating corresponding Vulkan resources.
+
+[source,cpp]
+----
+#include <tensorflow/lite/model.h>
+#include <tensorflow/lite/interpreter.h>
+#include <tensorflow/lite/kernels/register.h>
+
+class VulkanMLTFLiteLoader {
+private:
+    VkDevice device;
+    std::unique_ptr<tflite::FlatBufferModel> model;
+    std::unique_ptr<tflite::Interpreter> interpreter;
+
+    // Vulkan resources for model
+    std::vector<VkBuffer> weightBuffers;
+    std::vector<VkDeviceMemory> weightMemory;
+    std::vector<VkPipeline> layerPipelines;
+    std::vector<VkDescriptorSetLayout> descriptorLayouts;
+
+public:
+    bool loadModel(const std::string& modelPath) {
+        // Load TensorFlow Lite model
+        model = tflite::FlatBufferModel::BuildFromFile(modelPath.c_str());
+        if (!model) return false;
+
+        // Create interpreter for model analysis
+        tflite::ops::builtin::BuiltinOpResolver resolver;
+        tflite::InterpreterBuilder builder(*model, resolver);
+        builder(&interpreter);
+        if (!interpreter) return false;
+
+        // Analyze model and create Vulkan resources
+        return analyzeAndCreateVulkanResources();
+    }
+
+private:
+    bool analyzeAndCreateVulkanResources() {
+        // Extract layer information from TFLite model
+        const auto& subgraph = *interpreter->subgraphs()[0];
+
+        // Create Vulkan pipelines for each layer type
+        for (const auto& node : subgraph.nodes_and_registration()) {
+            createPipelineForLayer(node.second.builtin_code);
+        }
+
+        // Upload model weights to GPU buffers
+        return uploadWeightsToVulkan();
+    }
+
+    VkBuffer getWeightBuffer(size_t layerIndex) const {
+        return weightBuffers[layerIndex];
+    }
+
+    VkPipeline getLayerPipeline(size_t layerIndex) const {
+        return layerPipelines[layerIndex];
+    }
+};
+----
+
+=== NNEF Model Loading
+
+NNEF (Neural Network Exchange Format) models provide a standardized, vendor-neutral representation that maps well to Vulkan compute operations.
+
+[source,cpp]
+----
+#include <nnef/nnef.h>
+
+class VulkanMLNNEFLoader {
+private:
+    VkDevice device;
+    nnef::Graph nnefGraph;
+    std::map<std::string, VkBuffer> tensorBuffers;
+    std::vector<VkPipeline> operationPipelines;
+
+public:
+    bool loadModel(const std::string& modelPath) {
+        // Load NNEF model
+        std::string error;
+        if (!nnef::load_graph(modelPath, nnefGraph, error)) {
+            return false;
+        }
+
+        // Create Vulkan resources for NNEF operations
+        return createVulkanResourcesFromNNEF();
+    }
+
+private:
+    bool createVulkanResourcesFromNNEF() {
+        // Create pipelines for each NNEF operation
+        for (const auto& op : nnefGraph.operations) {
+            VkPipeline pipeline = createPipelineForOperation(op);
+            operationPipelines.push_back(pipeline);
+        }
+
+        // Create buffers for tensors
+        for (const auto& tensor : nnefGraph.tensors) {
+            createBufferForTensor(tensor);
+        }
+
+        return true;
+    }
+
+public:
+    const nnef::Graph& getGraph() const { return nnefGraph; }
+    VkPipeline getOperationPipeline(size_t opIndex) const {
+        return operationPipelines[opIndex];
+    }
+};
+----
+
+=== ONNX Model Loading
+
+ONNX models can be loaded and converted to Vulkan compute operations for high-performance inference.
+
+[source,cpp]
+----
+#include <onnx/onnx.pb.h>
+
+class VulkanMLONNXLoader {
+private:
+    VkDevice device;
+    onnx::ModelProto onnxModel;
+    std::vector<VkBuffer> weightBuffers;
+    std::vector<VkPipeline> nodePipelines;
+
+public:
+    bool loadModel(const std::string& modelPath) {
+        // Load ONNX model
+        std::ifstream input(modelPath, std::ios::binary);
+        if (!onnxModel.ParseFromIstream(&input)) {
+            return false;
+        }
+
+        // Convert ONNX graph to Vulkan resources
+        return createVulkanResourcesFromONNX();
+    }
+
+private:
+    bool createVulkanResourcesFromONNX() {
+        const auto& graph = onnxModel.graph();
+
+        // Create pipelines for each ONNX node
+        for (const auto& node : graph.node()) {
+            VkPipeline pipeline = createPipelineForONNXNode(node);
+            nodePipelines.push_back(pipeline);
+        }
+
+        // Upload initializer weights to GPU
+        for (const auto& initializer : graph.initializer()) {
+            uploadInitializerToGPU(initializer);
+        }
+
+        return true;
+    }
+
+public:
+    const onnx::ModelProto& getModel() const { return onnxModel; }
+    VkPipeline getNodePipeline(size_t nodeIndex) const {
+        return nodePipelines[nodeIndex];
+    }
+};
+----
+
+== Running Inference
+
+Once models are loaded into Vulkan objects, inference can be executed using a unified approach regardless of the original model format. This section demonstrates inference execution with pseudocode and practical examples.
+
+=== Inference Execution Framework
+
+[source,cpp]
+----
+class VulkanMLInferenceEngine {
+private:
+    VkDevice device;
+    VkQueue computeQueue;
+    VkCommandPool commandPool;
+
+    // Model-agnostic resources
+    std::vector<VkBuffer> activationBuffers;
+    std::vector<VkDescriptorSet> descriptorSets;
+
+public:
+    // Generic inference execution assuming model is already loaded
+    bool runInference(const std::vector<VkPipeline>& pipelines,
+                     const std::vector<VkBuffer>& weightBuffers,
+                     const float* inputData,
+                     float* outputData) {
+
+        VkCommandBuffer commandBuffer = beginCommandBuffer();
+
+        // Upload input data to GPU
+        uploadInputData(commandBuffer, inputData);
+
+        // Execute each layer/operation sequentially
+        for (size_t i = 0; i < pipelines.size(); ++i) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[i]);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                   pipelineLayout, 0, 1, &descriptorSets[i], 0, nullptr);
+
+            // Dispatch compute work
+            vkCmdDispatch(commandBuffer, workGroupsX, workGroupsY, workGroupsZ);
+
+            // Add memory barrier between operations
+            addMemoryBarrier(commandBuffer);
+        }
+
+        // Download output data from GPU
+        downloadOutputData(commandBuffer, outputData);
+
+        return submitAndWait(commandBuffer);
+    }
+};
+----
+
+=== Case Study Examples
+
+The following examples demonstrate common inference patterns using the unified VulkanML approach.
+
+==== Matrix Multiplication (Fully Connected Layer)
+
+[source,glsl]
+----
+#version 450
+#extension GL_KHR_cooperative_matrix : enable
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuffer {
+    float16_t input[];
+};
+
+layout(set = 0, binding = 1) readonly buffer WeightBuffer {
+    float16_t weights[];
+};
+
+layout(set = 0, binding = 2) writeonly buffer OutputBuffer {
+    float16_t output[];
+};
+
+void main() {
+    // Use cooperative matrices for efficient matrix multiplication
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> result;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> inputMatrix;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> weightMatrix;
+
+    // Load matrices and compute
+    coopMatLoad(inputMatrix, input, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatLoad(weightMatrix, weights, 0, 16, gl_CooperativeMatrixLayoutColumnMajor);
+    result = coopMatMulAdd(inputMatrix, weightMatrix, result);
+    coopMatStore(result, output, 0, 16, gl_CooperativeMatrixLayoutRowMajor);
+}
+----
+
+==== Convolution Operation
+
+[source,glsl]
+----
+#version 450
+#extension GL_KHR_cooperative_matrix : enable
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform ConvParams {
+    uint inputHeight, inputWidth, inputChannels;
+    uint outputChannels, kernelSize, stride, padding;
+} params;
+
+void main() {
+    uint outputY = gl_WorkGroupID.x;
+    uint outputX = gl_WorkGroupID.y;
+
+    // Simplified convolution using cooperative matrices
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> accumulator;
+
+    // Perform convolution across kernel
+    for (uint ky = 0; ky < params.kernelSize; ++ky) {
+        for (uint kx = 0; kx < params.kernelSize; ++kx) {
+            uint inputY = outputY * params.stride + ky - params.padding;
+            uint inputX = outputX * params.stride + kx - params.padding;
+
+            if (inputY < params.inputHeight && inputX < params.inputWidth) {
+                // Load input patch and kernel weights, accumulate result
+                // (Implementation details simplified for brevity)
+            }
+        }
+    }
+}
+----
+
+==== Quantized Inference
+
+[source,glsl]
+----
+#version 450
+#extension GL_KHR_cooperative_matrix : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 3) uniform QuantizationParams {
+    float inputScale, weightScale, outputScale;
+    int inputZeroPoint, weightZeroPoint, outputZeroPoint;
+} quant;
+
+void main() {
+    // Use INT8 cooperative matrices for quantized inference
+    coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> result;
+    coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> inputMatrix;
+    coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> weightMatrix;
+
+    // Perform quantized computation with requantization
+    result = coopMatMulAdd(inputMatrix, weightMatrix, result);
+
+    // Apply requantization: (input_scale * weight_scale) / output_scale
+    // (Simplified - actual implementation would handle overflow/saturation)
+}
+----
+
+== Best Practices
+
+=== Performance Optimization
+
+1. **Choose Appropriate Data Types**: Use the lowest precision that maintains acceptable accuracy
+2. **Optimize Memory Layout**: Ensure matrices are stored in optimal layouts for cooperative matrix operations
+3. **Batch Operations**: Process multiple inputs simultaneously when possible
+4. **Pipeline Parallelism**: Overlap compute and memory operations
+
+=== Portability Considerations
+
+1. **Query Hardware Capabilities**: Always check for cooperative matrix support and available formats
+2. **Fallback Implementations**: Provide standard compute shader fallbacks for unsupported hardware
+3. **Vendor Testing**: Test on multiple GPU vendors to ensure compatibility
+
+=== Memory Management
+
+1. **Buffer Alignment**: Ensure buffers are properly aligned for cooperative matrix operations
+2. **Memory Pooling**: Reuse buffers across inference runs to reduce allocation overhead
+3. **Staging Buffers**: Use staging buffers for efficient host-to-device data transfers
+
+== Vendor XXXX Best Practices
+
+=== XXX Guidelines
+
+==== Cooperative Matrix XXX Optimization
+
+==== Memory Layout XXX Patterns
+
+==== Pipeline XXX Architecture
+
+==== Shader XXX Standardization
+
+==== Performance XXX Profiling
+
+==== Debugging XXX Framework
+
+==== Cross-Platform XXX Compatibility
+
+[NOTE]
+====
+XXX provides these template guidelines as reference implementations. Adapt these patterns based on your specific hardware requirements and performance targets.
+====
+
+== Resources and Further Reading
+
+* link:https://registry.khronos.org/vulkan/specs/latest/man/html/VK_KHR_cooperative_matrix.html[VK_KHR_cooperative_matrix Extension]
+* link:https://github.com/KhronosGroup/GLSL/blob/master/extensions/khr/GL_KHR_cooperative_matrix.txt[GLSL Cooperative Matrix Extension]
+* link:https://www.tensorflow.org/lite[TensorFlow Lite Documentation]
+* Vendor-specific optimization guides (consult your GPU vendor's documentation)
+
+[NOTE]
+====
+VulkanML is an evolving ecosystem. Check with the Khronos Group and GPU vendors for the latest updates on cooperative matrix support and optimization techniques.
+====
