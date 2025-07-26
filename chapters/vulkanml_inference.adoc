@@ -534,7 +534,7 @@ XXX provides these template guidelines as reference implementations. Adapt these
 == Resources and Further Reading
 
 * link:https://registry.khronos.org/vulkan/specs/latest/man/html/VK_KHR_cooperative_matrix.html[VK_KHR_cooperative_matrix Extension]
-* link:https://github.com/KhronosGroup/GLSL/blob/master/extensions/khr/GL_KHR_cooperative_matrix.txt[GLSL Cooperative Matrix Extension]
+* link:https://github.com/KhronosGroup/GLSL/blob/main/extensions/khr/GLSL_KHR_cooperative_matrix.txt[GLSL Cooperative Matrix Extension]
 * link:https://www.tensorflow.org/lite[TensorFlow Lite Documentation]
 * Vendor-specific optimization guides (consult your GPU vendor's documentation)
 
